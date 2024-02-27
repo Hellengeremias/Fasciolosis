@@ -1,0 +1,1029 @@
+---
+title: "Drescher et al. manuscript 2024"
+author: "Santos, HGS"
+date: '2024'
+output: pdf_document
+---
+
+
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = TRUE}
+library(tidyverse)
+library(CompareTests)
+library(pROC)
+library(caret)
+```
+
+
+# Abattoir
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+abatedouro <- readxl::read_xlsx("dados_abatedouro_080922.xlsx")
+abatedouro_r <- abatedouro %>%
+  mutate_if(is.character, as.factor) %>% 
+  filter(Numero != 2)
+
+abatedouro_r$catepsina_rec <- as.numeric(ifelse(abatedouro_r$Resultado_ELISA_Catepsina_recombinante == "Negativo", 0, 1))
+
+abatedouro_r$mean_Elisa_Catepsina <- (abatedouro_r$ELISA1_Catepsina_recombinante + abatedouro_r$ELISA2_Catepsina_recombinante)/2
+```
+
+## descriptive analysis
+
+- diagnostic value of serodiagnosis tests compared to gold standard test (liver inspection)
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+abatedouro_r <- dplyr::filter(abatedouro_r)
+dados_ET <- dplyr::select(abatedouro_r, Animal, 
+                          ELISA1, ELISA2, Diagnostico_Frigorifico)
+dados_ET$tipo <- rep("FhSA", nrow(dados_ET))
+
+dados_PS <- dplyr::select(abatedouro_r, Animal, 
+                          ELISA1_Proteina_soluvel, ELISA2_Proteina_soluvel, Diagnostico_Frigorifico)
+names(dados_PS)[2:3] <- c("ELISA1", "ELISA2")
+dados_PS$tipo <- rep("FhES", nrow(dados_PS))
+
+dados_CR <- dplyr::select(abatedouro_r, Animal, 
+                          ELISA1_Catepsina_recombinante, ELISA2_Catepsina_recombinante, Diagnostico_Frigorifico)
+names(dados_CR)[2:3] <- c("ELISA1", "ELISA2")
+dados_CR$tipo <- rep("FhrCL-1", nrow(dados_CR))
+
+dados_emp <- rbind(dados_ET, dados_PS, dados_CR)
+dados_emp$mean_Elisa <- (dados_emp$ELISA1 + dados_emp$ELISA2)/2
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, fig.align = 'center', cache = FALSE}
+dados_emp$gold_standard <- ifelse(dados_emp$Diagnostico_Frigorifico == "Negativo", "No", "Yes")
+d <- dados_emp %>%
+  drop_na %>%
+  ggplot(aes(x = tipo, y = mean_Elisa)) +
+  geom_boxplot(fill = "white", colour = "black", outlier.size = 1, outlier.shape = 1) +
+  facet_wrap(~ gold_standard) +
+  xlab("") +
+  ylab("Mean Elisa") +
+  theme_classic(base_line_size = 0.3, base_rect_size = 0.3, base_size = 8) +
+  theme(axis.title.x = element_text(size = 12), 
+        strip.text.x = element_text(size = 12), 
+        text = element_text(size = 12))
+plot(d)
+```
+
+
+### Table 1: descriptive summary 
+
+- FhES
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "Yes"]),3)
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "No"]),3)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "Yes"]),3)
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "No"]),3)
+```
+
+- FhSA
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA"  & dados_emp$gold_standard == "Yes"]),3)
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA" & dados_emp$gold_standard == "No"]),3)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA" & dados_emp$gold_standard == "Yes"]),3)
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA" & dados_emp$gold_standard == "No"]),3)
+```
+
+- FhrCL-1
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "Yes"]),3)
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "No"]),3)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "Yes"]),3)
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "No"]),3)
+```
+
+
+## Diagnostic performance of serodiagnosis tests (Table 2)
+
+## Logistic regression
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# performance measures (accuracy, Kappa, area under ROC curve, sensitivity, specificity)
+set.seed(8)
+fiveStats <- function(...)c(twoClassSummary(...), defaultSummary(...))
+
+# control function
+set.seed(8)
+ctrl <- trainControl(method = "none",
+                     savePredictions=TRUE,
+                     classProbs = TRUE,
+                     summaryFunction = fiveStats,
+                     verboseIter = TRUE)
+```
+
+### FhSA
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# adjusted model
+p_YesRL<-NULL
+Results_RL<-list()
+banco_final_c <- abatedouro_r %>% 
+  dplyr::select(Diagnostico_Frigorifico, mean_Elisa) %>%
+  dplyr::mutate(Res = as.factor(ifelse(Diagnostico_Frigorifico == "Negativo", "Nao", "Sim"))) %>%
+  dplyr::mutate(log_mean_Elisa =  log(mean_Elisa)) %>% 
+  dplyr::select(-Diagnostico_Frigorifico)
+
+banco_final_c$Res <- relevel(banco_final_c$Res, ref = "Sim")
+
+# logistic regression (iterate train and test set)
+p=1
+for (p in 1: nrow(banco_final_c)){
+  trainData <- banco_final_c[-p,]
+  testData <- banco_final_c[p,]
+
+set.seed(1)
+reglog <- train(Res ~ log_mean_Elisa, data=trainData,
+                method="glm",
+                trControl=ctrl,
+                family="binomial",
+                metric="ROC")
+
+Results_RL[[p]]<-reglog$results
+
+predicao_probRL <- predict(reglog,dplyr::select(testData,-Res), type = "prob")
+p_YesRL[p] <- predicao_probRL[,"Sim"]
+}
+```
+
+- AUC-ROC
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+rocCurveRL <- pROC::roc(response = banco_final_c$Res, 
+                  predictor = p_YesRL,
+                  levels = rev(levels(banco_final_c$Res)))
+
+AUC_rl<-pROC::auc(rocCurveRL)
+AUC_rl
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+IC_AUC_rl<-pROC::ci.auc(rocCurveRL)
+IC_AUC_rl
+```
+
+- diagnostic measures
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+treshRL <- coords(rocCurveRL, x="best", best.method = "closest.topleft")
+newValueRL <- factor(ifelse(p_YesRL > treshRL[[1]], "Sim", "Nao"),
+                     levels = levels(banco_final_c$Res))
+df_RL <- as.data.frame(cbind(banco_final_c, p_YesRL = round(p_YesRL, 7), class_treshRL = newValueRL))
+corte_ET <- df_RL$mean_Elisa[which(df_RL$p_YesRL == 0.1041514)] #treshRL
+
+abatedouro_r$extrato_total_ROC <- as.factor(ifelse(abatedouro_r$mean_Elisa < corte_ET, 
+                                                   "Negativo", "Positivo"))
+t4 <- CompareTests(abatedouro_r$Diagnostico_Frigorifico, abatedouro_r$extrato_total_ROC, 
+             strata = NA, goldstd = "Diagnostico_Frigorifico")
+```
+
+## FhES
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# adjusted model
+p_YesRL2 <-NULL
+Results_RL2 <-list()
+banco_final_c <- abatedouro_r %>% 
+  dplyr::select(Diagnostico_Frigorifico, mean_Elisa_PS) %>% 
+  dplyr::mutate(Res = as.factor(ifelse(Diagnostico_Frigorifico == "Negativo", "Nao", "Sim"))) %>% 
+  dplyr::mutate(log_mean_Elisa_PS = log(mean_Elisa_PS)) %>% 
+  dplyr::select(-Diagnostico_Frigorifico)
+
+banco_final_c$Res <- relevel(banco_final_c$Res, ref = "Sim")
+
+# logistic regression (iterate train and test set)
+p=1
+for (p in 1: nrow(banco_final_c)){
+  trainData <- banco_final_c[-p,]
+  
+  testData <- banco_final_c[p,]
+
+set.seed(1)
+reglog <- train(Res ~ log_mean_Elisa_PS, data=trainData,
+                method="glm",
+                trControl=ctrl,
+                family="binomial",
+                metric="ROC")
+
+Results_RL2[[p]]<-reglog$results
+
+predicao_probRL2 <- predict(reglog, dplyr::select(testData,-Res), type = "prob")
+p_YesRL2[p] <- predicao_probRL2[,"Sim"]
+}
+```
+
+- AUC-ROC
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+rocCurveRL2 <- roc(response = banco_final_c$Res, 
+                  predictor = p_YesRL2,
+                  levels = rev(levels(banco_final_c$Res)))
+
+AUC_rl2 <- pROC::auc(rocCurveRL2)
+AUC_rl2
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+IC_AUC_rl2 <- pROC::ci.auc(rocCurveRL2)
+IC_AUC_rl2
+```
+
+- diagnostic measures
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+treshRL2 <- coords(rocCurveRL2, x="best", best.method = "closest.topleft")
+
+newValueRL2 <- factor(ifelse(p_YesRL2 > treshRL2[[1]], "Sim", "Nao"),
+                     levels = levels(banco_final_c$Res))
+
+df_RL2 <- as.data.frame(cbind(banco_final_c, p_YesRL = round(p_YesRL2, 7), class_treshRL = newValueRL2))
+corte_PS <- df_RL2$mean_Elisa_PS[which(df_RL2$p_YesRL == 0.0807219)] #treshRL2
+abatedouro_r$proteina_soluvel_ROC <- as.factor(ifelse(abatedouro_r$mean_Elisa_PS < corte_PS, "Negativo", "Positivo"))
+t5 <- CompareTests(abatedouro_r$Diagnostico_Frigorifico, abatedouro_r$proteina_soluvel_ROC, 
+             strata = NA, goldstd = "Diagnostico_Frigorifico")
+```
+
+## FhrCL-1
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# adjusted model
+p_YesRL3 <-NULL
+Results_RL3 <-list()
+banco_final_c <- abatedouro_r %>% 
+  dplyr::filter(Numero != 2) %>% 
+  dplyr::select(Diagnostico_Frigorifico, mean_Elisa_Catepsina) %>% 
+  dplyr::mutate(Res = as.factor(ifelse(Diagnostico_Frigorifico == "Negativo", "Nao", "Sim"))) %>% 
+  dplyr::mutate(log_mean_Elisa_Catepsina = log(mean_Elisa_Catepsina)) %>% 
+  dplyr::select(-Diagnostico_Frigorifico)
+
+banco_final_c$Res <- relevel(banco_final_c$Res, ref = "Sim")
+
+# logistic regression (iterate train and test set)
+p=1
+for (p in 1: nrow(banco_final_c)){
+  trainData <- banco_final_c[-p,]
+  
+  testData <- banco_final_c[p,]
+
+set.seed(1)
+reglog <- train(Res ~ log_mean_Elisa_Catepsina, data=trainData,
+                method="glm",
+                trControl=ctrl,
+                family="binomial",
+                metric="ROC")
+
+Results_RL3[[p]]<-reglog$results
+
+predicao_probRL3 <- predict(reglog, dplyr::select(testData,-Res), type = "prob")
+p_YesRL3[p] <- predicao_probRL3[,"Sim"]
+}
+```
+
+- AUC-ROC
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+rocCurveRL3 <- roc(response = banco_final_c$Res, 
+                  predictor = p_YesRL3,
+                  levels = rev(levels(banco_final_c$Res)))
+
+AUC_rl3 <- pROC::auc(rocCurveRL3)
+AUC_rl3
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+IC_AUC_rl3 <- pROC::ci.auc(rocCurveRL3)
+IC_AUC_rl3 
+```
+
+- diagnostic measures
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+treshRL3 <- coords(rocCurveRL3, x="best", best.method = "closest.topleft")
+
+newValueRL3 <- factor(ifelse(p_YesRL3 > treshRL3[[1]], "Sim", "Nao"),
+                     levels = levels(banco_final_c$Res))
+df_RL3 <- as.data.frame(cbind(banco_final_c, p_YesRL = round(p_YesRL3, 7), class_treshRL = newValueRL3))
+corte_CR <- df_RL3$mean_Elisa_Catepsina[which(df_RL3$p_YesRL == 0.0546259)] #treshRL3
+abatedouro_r$catepsina_rec_ROC <- as.factor(ifelse(abatedouro_r$mean_Elisa_Catepsina < corte_CR, "Negativo", "Positivo"))
+t6 <- CompareTests(abatedouro_r$Diagnostico_Frigorifico, abatedouro_r$catepsina_rec_ROC, 
+             strata = NA, goldstd = "Diagnostico_Frigorifico")
+```
+
+- Figure 1: ROC curves
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+roc.pred1 <- rocCurveRL2
+roc.pred2 <- rocCurveRL
+roc.pred3 <- rocCurveRL3
+
+plot.roc(roc.pred1, plot=TRUE, legacy.axes=TRUE, percent=FALSE, 
+         xlab="False Positive Rate", ylab="True Postive Rate", 
+         col="grey5", lty = 1, lwd = 2)
+lines(roc.pred2, type = "l", lty = 8, lwd = 2, col = "grey20")
+lines(roc.pred3, type = "l", lty = 4, lwd = 2, col = "grey45")
+legend("bottomright", 
+       legend = c("FhES", "FhSA", "FhrCL-1"), 
+       col = c("grey5", "grey20", "grey45"),
+       lty = c(1, 8, 4), lwd = c(2,2,2))
+```
+
+# Farms
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+propriedade <- readxl::read_xlsx("dados_propriedade_30.06.23.xlsx")
+propriedade_r <- propriedade %>% mutate_if(is.character, as.factor)
+
+propriedade_r <- propriedade_r %>%
+  drop_na(ELISA1, ELISA2, ELISA1_Proteina_soluvel, ELISA2_Proteina_soluvel) %>% 
+  filter(!is.na(Tecnica_Sedimentacao))
+
+propriedade_r$catepsina_rec <- as.numeric(ifelse(
+  propriedade_r$Resultado_ELISA_Catepsina_recombinante == "Negativo", 0, 1))
+
+propriedade_r$mean_Elisa_Catepsina <- (propriedade_r$ELISA1_Catepsina_recombinante + propriedade_r$ELISA2_Catepsina_recombinante)/2
+
+# positive for fasciolosis only
+propriedade_r <- propriedade_r %>% 
+  filter(Strongylidae != 1 & Eimeria != 1)
+```
+
+
+## descriptive analysis
+
+- diagnostic value of serodiagnosis tests compared to gold standard test (coprological examination)
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+dados_ET <- dplyr::select(propriedade_r, Animal, ELISA1, ELISA2, Tecnica_Sedimentacao)
+dados_ET$tipo <- rep("FhSA", nrow(dados_ET))
+
+dados_PS <- dplyr::select(propriedade_r, Animal, ELISA1_Proteina_soluvel, ELISA2_Proteina_soluvel, Tecnica_Sedimentacao)
+names(dados_PS)[2:3] <- c("ELISA1", "ELISA2")
+dados_PS$tipo <- rep("FhES", nrow(dados_PS))
+
+dados_CR <- dplyr::select(propriedade_r, Animal, ELISA1_Catepsina_recombinante, ELISA2_Catepsina_recombinante, Tecnica_Sedimentacao)
+names(dados_CR)[2:3] <- c("ELISA1", "ELISA2")
+dados_CR$tipo <- rep("FhrCL-1", nrow(dados_CR))
+
+dados_emp <- rbind(dados_ET, dados_PS, dados_CR)
+dados_emp$mean_Elisa <- (dados_emp$ELISA1 + dados_emp$ELISA2)/2
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, fig.align = 'center', cache = FALSE}
+dados_emp$gold_standard <- ifelse(dados_emp$Tecnica_Sedimentacao == "Negativo", "No", "Yes")
+d <- dados_emp %>%
+  drop_na %>%
+  ggplot(aes(x = tipo, y = mean_Elisa)) +
+  geom_boxplot(fill = "white", colour = "black", outlier.size = 1, outlier.shape = 1) +
+  facet_wrap(~ gold_standard) +
+  xlab("") +
+  ylab("Mean Elisa") +
+  theme_classic(base_line_size = 0.3, base_rect_size = 0.3, base_size = 8) +
+  theme(axis.title.x = element_text(size = 12), 
+        strip.text.x = element_text(size = 12), 
+        text = element_text(size = 12))
+plot(d)
+```
+
+
+### Table 3: descriptive summary 
+
+- FhES
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "Yes"]),3)
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "No"]),3)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "Yes"]),3)
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "No"]),3)
+```
+
+- FhSA
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA"  & dados_emp$gold_standard == "Yes"]),3)
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA" & dados_emp$gold_standard == "No"]),3)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA" & dados_emp$gold_standard == "Yes"]),3)
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA" & dados_emp$gold_standard == "No"]),3)
+```
+
+- FhrCL-1
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "Yes"]),3)
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "No"]),3)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "Yes"]),3)
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "No"]),3)
+```
+
+
+## Diagnostic performance of serodiagnosis tests (Table 4)
+
+## Logistic regression
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# performance measures (accuracy, Kappa, area under ROC curve, sensitivity, specificity)
+set.seed(8)
+fiveStats <- function(...)c(twoClassSummary(...), defaultSummary(...))
+
+# control function
+set.seed(8)
+ctrl <- trainControl(method = "none",
+                     savePredictions=TRUE,
+                     classProbs = TRUE,
+                     summaryFunction = fiveStats,
+                     verboseIter = TRUE)
+```
+
+### FhSA
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# adjusted model
+p_YesRL<-NULL
+Results_RL<-list()
+banco_final_c <- propriedade_r %>% 
+  dplyr::select(Tecnica_Sedimentacao, mean_Elisa) %>%
+  dplyr::mutate(Res = as.factor(ifelse(Tecnica_Sedimentacao == "Negativo", "Nao", "Sim"))) %>% 
+  dplyr::mutate(log_mean_Elisa = log(mean_Elisa)) %>% 
+  dplyr::select(-Tecnica_Sedimentacao)
+
+banco_final_c$Res <- relevel(banco_final_c$Res, ref = "Sim")
+
+# logistic regression (iterate train and test set)
+p=1
+for (p in 1: nrow(banco_final_c)){
+  trainData <- banco_final_c[-p,]
+  
+  testData <- banco_final_c[p,]
+
+set.seed(1)
+reglog <- train(Res ~ log_mean_Elisa, data=trainData,
+                method="glm",
+                trControl=ctrl,
+                family="binomial",
+                metric="ROC")
+
+Results_RL[[p]]<-reglog$results
+
+predicao_probRL <- predict(reglog,dplyr::select(testData,-Res), type = "prob")
+p_YesRL[p] <- predicao_probRL[,"Sim"]
+}
+```
+
+- AUC-ROC
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+rocCurveRL <- pROC::roc(response = banco_final_c$Res, 
+                  predictor = p_YesRL,
+                  levels = rev(levels(banco_final_c$Res)))
+AUC_rl<-pROC::auc(rocCurveRL)
+AUC_rl
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+IC_AUC_rl<-pROC::ci.auc(rocCurveRL)
+IC_AUC_rl
+```
+
+- diagnostic measures
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+treshRL <- coords(rocCurveRL, x="best", best.method = "closest.topleft")
+newValueRL <- factor(ifelse(p_YesRL > treshRL[[1]], "Sim", "Nao"),
+                     levels = levels(banco_final_c$Res))
+df_RL <- as.data.frame(cbind(banco_final_c, p_YesRL = round(p_YesRL, 7), class_treshRL = newValueRL))
+corte_ET <- df_RL$mean_Elisa[which(df_RL$p_YesRL == 0.0693621)] #treshRL
+propriedade_r$extrato_total_ROC <- as.factor(ifelse(propriedade_r$mean_Elisa < corte_ET, "0", "1"))
+t4 <- CompareTests(stdtest = propriedade_r$padrao_outro, 
+                   sampledtest = propriedade_r$extrato_total_ROC, 
+             strata = NA, goldstd = "padrao_outro")
+```
+
+### FhSE
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# adjusted model
+p_YesRL2 <-NULL
+Results_RL2 <-list()
+banco_final_c <- propriedade_r %>% 
+  dplyr::select(Tecnica_Sedimentacao, mean_Elisa_PS) %>% 
+  dplyr::mutate(Res = as.factor(ifelse(Tecnica_Sedimentacao == "Negativo", "Nao", "Sim"))) %>% 
+  dplyr::mutate(log_mean_Elisa_PS = log(mean_Elisa_PS)) %>% 
+  dplyr::select(-Tecnica_Sedimentacao)
+
+banco_final_c$Res <- relevel(banco_final_c$Res, ref = "Sim")
+
+# logistic regression (iterate train and test set)
+p=1
+for (p in 1: nrow(banco_final_c)){
+  trainData <- banco_final_c[-p,]
+  
+  testData <- banco_final_c[p,]
+
+set.seed(1)
+reglog <- train(Res ~ log_mean_Elisa_PS, data=trainData,
+                method="glm",
+                trControl=ctrl,
+                family="binomial",
+                metric="ROC")
+
+Results_RL2[[p]]<-reglog$results
+
+predicao_probRL2 <- predict(reglog, dplyr::select(testData,-Res), type = "prob")
+p_YesRL2[p] <- predicao_probRL2[,"Sim"]
+}
+```
+
+- AUC-ROC
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+rocCurveRL2 <- roc(response = banco_final_c$Res, 
+                  predictor = p_YesRL2,
+                  levels = rev(levels(banco_final_c$Res)))
+
+AUC_rl2 <- pROC::auc(rocCurveRL2)
+AUC_rl2
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+IC_AUC_rl2 <- pROC::ci.auc(rocCurveRL2)
+IC_AUC_rl2 
+```
+
+- diagnostic measures
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+treshRL2 <- coords(rocCurveRL2, x="best", best.method = "closest.topleft")
+
+newValueRL2 <- factor(ifelse(p_YesRL2 > treshRL2[[1]], "Sim", "Nao"),
+                     levels = levels(banco_final_c$Res))
+df_RL2 <- as.data.frame(cbind(banco_final_c, p_YesRL = round(p_YesRL2, 7), class_treshRL = newValueRL2))
+corte_PS <- df_RL2$mean_Elisa_PS[which(df_RL2$p_YesRL == 0.0890676)] #treshRL2
+propriedade_r$proteina_soluvel_ROC <- as.factor(ifelse(propriedade_r$mean_Elisa_PS < corte_PS, "0", "1"))
+t5 <- CompareTests(propriedade_r$padrao_outro, propriedade_r$proteina_soluvel_ROC, 
+             strata = NA, goldstd = "padrao_outro")
+```
+
+### FhrCL-1
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+# adjusted model
+p_YesRL3 <-NULL
+Results_RL3 <-list()
+banco_final_c <- propriedade_r %>% 
+  dplyr::filter(Numero != 2) %>% 
+  dplyr::select(Tecnica_Sedimentacao, mean_Elisa_Catepsina) %>% 
+  dplyr::mutate(Res = as.factor(ifelse(Tecnica_Sedimentacao == "Negativo", "Nao", "Sim"))) %>% 
+  dplyr::mutate(log_mean_Elisa_Catepsina = log(mean_Elisa_Catepsina)) %>% 
+  dplyr::select(-Tecnica_Sedimentacao)
+
+banco_final_c$Res <- relevel(banco_final_c$Res, ref = "Sim")
+
+p=1
+for (p in 1: nrow(banco_final_c)){
+  trainData <- banco_final_c[-p,]
+  
+  testData <- banco_final_c[p,]
+
+# logistic regression (iterate train and test set)
+set.seed(1)
+reglog <- train(Res ~ log_mean_Elisa_Catepsina, data=trainData,
+                method="glm",
+                trControl=ctrl,
+                family="binomial",
+                metric="ROC")
+
+Results_RL3[[p]]<-reglog$results
+
+predicao_probRL3 <- predict(reglog, dplyr::select(testData,-Res), type = "prob")
+p_YesRL3[p] <- predicao_probRL3[,"Sim"]
+}
+```
+
+- AUC-ROC
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+rocCurveRL3 <- roc(response = banco_final_c$Res, 
+                  predictor = p_YesRL3,
+                  levels = rev(levels(banco_final_c$Res)))
+
+AUC_rl3 <- pROC::auc(rocCurveRL3)
+AUC_rl3
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+IC_AUC_rl3 <- pROC::ci.auc(rocCurveRL3)
+IC_AUC_rl3 
+```
+
+- diagnostic measures
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+treshRL3 <- coords(rocCurveRL3, x="best", best.method = "closest.topleft")
+
+newValueRL3 <- factor(ifelse(p_YesRL3 > treshRL3[[1]], "Sim", "Nao"),
+                     levels = levels(banco_final_c$Res))
+df_RL3 <- as.data.frame(cbind(banco_final_c, p_YesRL = round(p_YesRL3, 7), class_treshRL = newValueRL3))
+corte_CR <- df_RL3$mean_Elisa_Catepsina[which(df_RL3$p_YesRL == 0.0640550)] #treshRL3
+propriedade_r$catepsina_rec_ROC <- as.factor(ifelse(propriedade_r$mean_Elisa_Catepsina < corte_CR, "0", "1"))
+t6 <- CompareTests(propriedade_r$padrao_outro, propriedade_r$catepsina_rec_ROC, 
+             strata = NA, goldstd = "padrao_outro")
+```
+
+- Figure 2: ROC curves
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+roc.pred1 <- rocCurveRL2
+roc.pred2 <- rocCurveRL
+roc.pred3 <- rocCurveRL3
+
+plot.roc(roc.pred1, plot=TRUE, legacy.axes=TRUE, percent=FALSE, 
+         xlab="False Positive Rate", ylab="True Postive Rate", 
+         col="grey5", lty = 1, lwd = 2)
+lines(roc.pred2, type = "l", lty = 8, lwd = 2, col = "grey20")
+lines(roc.pred3, type = "l", lty = 4, lwd = 2, col = "grey45")
+legend("bottomright", 
+       legend = c("FhES", "FhSA", "FhrCL-1"), 
+       col = c("grey5", "grey20", "grey45"),
+       lty = c(1, 8, 4), lwd = c(2,2,2))
+```
+
+# Supplemental material
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+propriedade <- readxl::read_xlsx("dados_propriedade_30.06.23.xlsx")
+
+propriedade_r <- propriedade %>% mutate_if(is.character, as.factor)
+
+propriedade_r <- propriedade_r %>%
+  drop_na(ELISA1, ELISA2, ELISA1_Proteina_soluvel, ELISA2_Proteina_soluvel) %>% 
+  filter(!is.na(Tecnica_Sedimentacao))
+
+propriedade_r$catepsina_rec <- as.numeric(ifelse(
+  propriedade_r$Resultado_ELISA_Catepsina_recombinante == "Negativo", 0, 1))
+
+propriedade_r$mean_Elisa_Catepsina <- (propriedade_r$ELISA1_Catepsina_recombinante + propriedade_r$ELISA2_Catepsina_recombinante)/2
+```
+
+## Absorbance values distribution (Supplementary Figure 1)
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+propriedade_r$g <- ifelse(propriedade_r$Tecnica_Sedimentacao == 'Positivo Fasciola' &
+                            propriedade_r$Strongylidae == 0 & propriedade_r$Eimeria == 0, '1.F hep.',
+                          ifelse(propriedade_r$Tecnica_Sedimentacao == 'Positivo Fasciola' &
+                            propriedade_r$Strongylidae == 1 & propriedade_r$Eimeria == 0 ,
+                            '2.F hep.&Stron', 
+                          ifelse(propriedade_r$Tecnica_Sedimentacao == 'Positivo Fasciola' &
+                            propriedade_r$Strongylidae == 0 & propriedade_r$Eimeria == 1, 
+                            '3.F hep.&Eimer.',
+                          ifelse(propriedade_r$Tecnica_Sedimentacao == 'Positivo Fasciola' &
+                            propriedade_r$Strongylidae == 1 & propriedade_r$Eimeria == 1,
+                            '4.F hep.&Stron.&Eimer.', 
+                            ifelse(propriedade_r$Tecnica_Sedimentacao == 'Negativo' &
+                            propriedade_r$Strongylidae == 1 & propriedade_r$Eimeria == 0, 
+                            '5.Stron.',
+                          ifelse(propriedade_r$Tecnica_Sedimentacao == 'Negativo' &
+                            propriedade_r$Strongylidae == 1 & propriedade_r$Eimeria == 1, 
+                          '6.Stron.&Eimer.','0.Negative'))))))
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+propriedade_r2 <- filter(propriedade_r, (g!="0.Negative"))
+
+FhSA <- ggplot(data = propriedade_r2, mapping = aes(x = g, y= mean_Elisa)) +
+  geom_jitter(width = 0.1, size = .5) +
+  stat_summary(fun="median", geom="segment", size = 0.2, mapping=aes(xend=..x.. - 0.15, yend=..y..), 
+               color = 'red')+
+  stat_summary(fun="median", geom="segment", size = 0.2, mapping=aes(xend=..x.. + 0.15, yend=..y..), 
+               color = 'red') +
+  geom_hline(yintercept = 0.4830, lty = 2, size = 0.15) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, hjust =.5, size = 8),
+        axis.text.y = element_text(size = 8), text = element_text(size = 8)) +
+  scale_y_continuous(breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4), 
+                     limits = c(0,1.4)) +
+  ylab("A450mm") +
+  ggtitle("FhSA") +
+  xlab("")
+plot(FhSA)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+FhSE <- ggplot(data = propriedade_r2, mapping = aes(x = g, y= mean_Elisa_PS)) +
+  geom_jitter(width = 0.1, size = .5) +
+  stat_summary(fun="median", geom="segment", size = 0.2, mapping=aes(xend=..x.. - 0.15, yend=..y..), 
+               color = 'red')+
+  stat_summary(fun="median", geom="segment", size = 0.2, mapping=aes(xend=..x.. + 0.15, yend=..y..), 
+               color = 'red') +
+   geom_hline(yintercept = 0.4105, lty = 2, size = 0.15) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, hjust =.5, size = 8),
+        axis.text.y = element_text(size = 8), text = element_text(size = 8)) +
+  scale_y_continuous(breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4), 
+                     limits = c(0,1.4)) +
+   ylab("A450mm") +
+  ggtitle("FhSE") +
+  xlab("")
+plot(FhSE)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+FhrCL1 <- ggplot(data = propriedade_r2, mapping = aes(x = g, y= mean_Elisa_Catepsina)) +
+  geom_jitter(width = 0.1, size = .5) +
+  stat_summary(fun="median", geom="segment", size = 0.2, mapping=aes(xend=..x.. - 0.15, yend=..y..), 
+               color = 'red')+
+  stat_summary(fun="median", geom="segment", size = 0.2, mapping=aes(xend=..x.. + 0.15, yend=..y..), 
+               color = 'red') +
+  geom_hline(yintercept = 0.1270, lty = 2, size = 0.15) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 0, vjust = 1, hjust =.5, size = 8),
+        axis.text.y = element_text(size = 8), text = element_text(size = 8)) +
+   scale_y_continuous(breaks = c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4), 
+                      limits = c(0,1.4)) +
+   ylab("A450mm") +
+  ggtitle("FhrCL-1") +
+  xlab("")
+plot(FhrCL1)
+```
+
+
+## descriptive analysis
+
+### diagnostic value of serodiagnosis tests compared to gold standard test (coprological examination)
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+dados_ET <- dplyr::select(propriedade_r, Animal, 
+                          ELISA1, ELISA2, Tecnica_Sedimentacao)
+dados_ET$tipo <- rep("FhSA", nrow(dados_ET))
+
+dados_PS <- dplyr::select(propriedade_r, Animal, 
+                          ELISA1_Proteina_soluvel, ELISA2_Proteina_soluvel, Tecnica_Sedimentacao)
+names(dados_PS)[2:3] <- c("ELISA1", "ELISA2")
+dados_PS$tipo <- rep("FhES", nrow(dados_PS))
+
+dados_CR <- dplyr::select(propriedade_r, Animal, 
+                          ELISA1_Catepsina_recombinante, ELISA2_Catepsina_recombinante, Tecnica_Sedimentacao)
+names(dados_CR)[2:3] <- c("ELISA1", "ELISA2")
+dados_CR$tipo <- rep("FhrCL-1", nrow(dados_CR))
+
+dados_emp <- rbind(dados_ET, dados_PS, dados_CR)
+dados_emp$mean_Elisa <- (dados_emp$ELISA1 + dados_emp$ELISA2)/2
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, fig.align = 'center', cache = FALSE}
+dados_emp$gold_standard <- ifelse(dados_emp$Tecnica_Sedimentacao == "Negativo", "No", "Yes")
+d <- dados_emp %>%
+  drop_na %>%
+  ggplot(aes(x = tipo, y = mean_Elisa)) +
+  geom_boxplot(fill = "white", colour = "black", outlier.size = 1, outlier.shape = 1) +
+  facet_wrap(~ gold_standard) +
+  xlab("") +
+  ylab("Mean Elisa") +
+  theme_classic(base_line_size = 0.3, base_rect_size = 0.3, base_size = 8) +
+  theme(axis.title.x = element_text(size = 12), 
+        strip.text.x = element_text(size = 12), 
+        text = element_text(size = 12))
+plot(d)
+```
+
+
+### Supplementary Table 1: descriptive summary 
+
+- FhES
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "Yes"]),3)
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "No"]),3)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "Yes"]),3)
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhES" & dados_emp$gold_standard == "No"]),3)
+```
+
+- FhSA
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA"  & dados_emp$gold_standard == "Yes"]),3)
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA" & dados_emp$gold_standard == "No"]),3)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA" & dados_emp$gold_standard == "Yes"]),3)
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhSA" & dados_emp$gold_standard == "No"]),3)
+```
+
+- FhrCL-1
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "Yes"]),3)
+round(summary(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "No"]),3)
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "Yes"]),3)
+round(sd(dados_emp$mean_Elisa[dados_emp$tipo == "FhrCL-1" & dados_emp$gold_standard == "No"]),3)
+```
+
+
+## Diagnostic performance of serodiagnosis tests (Supplementary Table 2)
+
+## Logistic regression
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# performance measures (accuracy, Kappa, area under ROC curve, sensitivity, specificity)
+set.seed(8)
+fiveStats <- function(...)c(twoClassSummary(...), defaultSummary(...))
+
+# control function
+set.seed(8)
+ctrl <- trainControl(method = "none",
+                     savePredictions=TRUE,
+                     classProbs = TRUE,
+                     summaryFunction = fiveStats,
+                     verboseIter = TRUE)
+```
+
+### FhSA
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# adjusted model
+p_YesRL<-NULL
+Results_RL<-list()
+banco_final_c <- propriedade_r %>% 
+  dplyr::select(Tecnica_Sedimentacao, mean_Elisa) %>%
+  dplyr::mutate(Res = as.factor(ifelse(Tecnica_Sedimentacao == "Negativo", "Nao", "Sim"))) %>% 
+  dplyr::mutate(log_mean_Elisa = log(mean_Elisa)) %>% 
+  dplyr::select(-Tecnica_Sedimentacao)
+
+banco_final_c$Res <- relevel(banco_final_c$Res, ref = "Sim")
+
+# logistic regression (iterate train and test set)
+p=1
+for (p in 1: nrow(banco_final_c)){
+  trainData <- banco_final_c[-p,]
+  
+  testData <- banco_final_c[p,]
+
+set.seed(1)
+reglog <- train(Res ~ log_mean_Elisa, data=trainData,
+                method="glm",
+                trControl=ctrl,
+                family="binomial",
+                metric="ROC")
+
+Results_RL[[p]]<-reglog$results
+
+predicao_probRL <- predict(reglog,dplyr::select(testData,-Res), type = "prob")
+p_YesRL[p] <- predicao_probRL[,"Sim"]
+}
+```
+
+- AUC-ROC
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo =TRUE}
+rocCurveRL <- pROC::roc(response = banco_final_c$Res, 
+                  predictor = p_YesRL,
+                  levels = rev(levels(banco_final_c$Res)))
+
+AUC_rl<-pROC::auc(rocCurveRL)
+AUC_rl
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo =TRUE}
+IC_AUC_rl<-pROC::ci.auc(rocCurveRL)
+IC_AUC_rl
+```
+
+- diagnostic measures
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+treshRL <- coords(rocCurveRL, x="best", best.method = "closest.topleft")
+newValueRL <- factor(ifelse(p_YesRL > treshRL[[1]], "Sim", "Nao"),
+                     levels = levels(banco_final_c$Res))
+df_RL <- as.data.frame(cbind(banco_final_c, p_YesRL = round(p_YesRL, 7), class_treshRL = newValueRL))
+corte_ET <- df_RL$mean_Elisa[which(df_RL$p_YesRL == 0.0852446)] #treshRL
+propriedade_r$extrato_total_ROC <- as.factor(ifelse(propriedade_r$mean_Elisa < corte_ET, "0", "1"))
+t4 <- CompareTests(stdtest = propriedade_r$padrao_outro, 
+                   sampledtest = propriedade_r$extrato_total_ROC, 
+             strata = NA, goldstd = "padrao_outro")
+```
+
+### FhSE
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# adjusted model
+p_YesRL2 <-NULL
+Results_RL2 <-list()
+banco_final_c <- propriedade_r %>% 
+  dplyr::select(Tecnica_Sedimentacao, mean_Elisa_PS) %>% 
+  dplyr::mutate(Res = as.factor(ifelse(Tecnica_Sedimentacao == "Negativo", "Nao", "Sim"))) %>% 
+  dplyr::mutate(log_mean_Elisa_PS = log(mean_Elisa_PS)) %>% 
+  dplyr::select(-Tecnica_Sedimentacao)
+
+banco_final_c$Res <- relevel(banco_final_c$Res, ref = "Sim")
+
+
+# logistic regression (iterate train and test set)
+p=1
+for (p in 1: nrow(banco_final_c)){
+  trainData <- banco_final_c[-p,]
+  
+  testData <- banco_final_c[p,]
+
+set.seed(1)
+reglog <- train(Res ~ log_mean_Elisa_PS, data=trainData,
+                method="glm",
+                trControl=ctrl,
+                family="binomial",
+                metric="ROC")
+
+Results_RL2[[p]]<-reglog$results
+
+predicao_probRL2 <- predict(reglog, dplyr::select(testData,-Res), type = "prob")
+p_YesRL2[p] <- predicao_probRL2[,"Sim"]
+}
+```
+
+- AUC-ROC
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+rocCurveRL2 <- roc(response = banco_final_c$Res, 
+                  predictor = p_YesRL2,
+                  levels = rev(levels(banco_final_c$Res)))
+
+AUC_rl2 <- pROC::auc(rocCurveRL2)
+AUC_rl2
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+IC_AUC_rl2 <- pROC::ci.auc(rocCurveRL2)
+IC_AUC_rl2 
+```
+
+- diagnostic measures
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+treshRL2 <- coords(rocCurveRL2, x="best", best.method = "closest.topleft")
+newValueRL2 <- factor(ifelse(p_YesRL2 > treshRL2[[1]], "Sim", "Nao"),
+                     levels = levels(banco_final_c$Res))
+df_RL2 <- as.data.frame(cbind(banco_final_c, p_YesRL = round(p_YesRL2, 7), class_treshRL = newValueRL2))
+corte_PS <- df_RL2$mean_Elisa_PS[which(df_RL2$p_YesRL == 0.1165574)] #treshRL2
+propriedade_r$proteina_soluvel_ROC <- as.factor(ifelse(propriedade_r$mean_Elisa_PS < corte_PS, "0", "1"))
+t5 <- CompareTests(propriedade_r$padrao_outro, propriedade_r$proteina_soluvel_ROC, 
+             strata = NA, goldstd = "padrao_outro")
+```
+
+### FhrCL-1
+```{r, results = 'hide', warning = FALSE, message = FALSE, echo = FALSE}
+# adjusted model
+p_YesRL3 <-NULL
+Results_RL3 <-list()
+banco_final_c <- propriedade_r %>% 
+  dplyr::filter(Numero != 2) %>% 
+  dplyr::select(Tecnica_Sedimentacao, mean_Elisa_Catepsina) %>% 
+  dplyr::mutate(Res = as.factor(ifelse(Tecnica_Sedimentacao == "Negativo", "Nao", "Sim"))) %>% 
+  dplyr::mutate(log_mean_Elisa_Catepsina = log(mean_Elisa_Catepsina)) %>% 
+  dplyr::select(-Tecnica_Sedimentacao)
+
+banco_final_c$Res <- relevel(banco_final_c$Res, ref = "Sim")
+
+p=1
+for (p in 1: nrow(banco_final_c)){
+  trainData <- banco_final_c[-p,]
+  
+  testData <- banco_final_c[p,]
+
+# logistic regression (iterate train and test set)
+set.seed(1)
+reglog <- train(Res ~ log_mean_Elisa_Catepsina, data=trainData,
+                method="glm",
+                trControl=ctrl,
+                family="binomial",
+                metric="ROC")
+
+Results_RL3[[p]]<-reglog$results
+
+predicao_probRL3 <- predict(reglog, dplyr::select(testData,-Res), type = "prob")
+p_YesRL3[p] <- predicao_probRL3[,"Sim"]
+}
+```
+
+- AUC-ROC
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+rocCurveRL3 <- roc(response = banco_final_c$Res, 
+                  predictor = p_YesRL3,
+                  levels = rev(levels(banco_final_c$Res)))
+
+AUC_rl3 <- pROC::auc(rocCurveRL3)
+AUC_rl3
+```
+
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = TRUE}
+IC_AUC_rl3 <- pROC::ci.auc(rocCurveRL3)
+IC_AUC_rl3 
+```
+
+- diagnostic measures
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE}
+treshRL3 <- coords(rocCurveRL3, x="best", best.method = "closest.topleft")
+newValueRL3 <- factor(ifelse(p_YesRL3 > treshRL3[[1]], "Sim", "Nao"),
+                     levels = levels(banco_final_c$Res))
+df_RL3 <- as.data.frame(cbind(banco_final_c, p_YesRL = round(p_YesRL3, 7), class_treshRL = newValueRL3))
+corte_CR <- df_RL3$mean_Elisa_Catepsina[which(df_RL3$p_YesRL == 0.0682613)] # treshRL3
+propriedade_r$catepsina_rec_ROC <- as.factor(ifelse(propriedade_r$mean_Elisa_Catepsina < corte_CR, "0", "1"))
+t6 <- CompareTests(propriedade_r$padrao_outro, propriedade_r$catepsina_rec_ROC, 
+             strata = NA, goldstd = "padrao_outro")
+```
+
+### Supplementary Figure 2: ROC curves
+```{r, results = 'hold', warning = FALSE, message = FALSE, echo = FALSE, cache = FALSE}
+roc.pred1 <- rocCurveRL2
+roc.pred2 <- rocCurveRL
+roc.pred3 <- rocCurveRL3
+
+plot.roc(roc.pred1, plot=TRUE, legacy.axes=TRUE, percent=FALSE, 
+         xlab="False Positive Rate", ylab="True Postive Rate", 
+         col="grey5", lty = 1, lwd = 2)
+lines(roc.pred2, type = "l", lty = 8, lwd = 2, col = "grey20")
+lines(roc.pred3, type = "l", lty = 4, lwd = 2, col = "grey45")
+legend("bottomright", 
+       legend = c("FhES", "FhSA", "FhrCL-1"), 
+       col = c("grey5", "grey20", "grey45"),
+       lty = c(1, 8, 4), lwd = c(2,2,2))
+```
